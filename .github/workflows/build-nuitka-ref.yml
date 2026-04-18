@@ -72,12 +72,10 @@ jobs:
         run: |
           $nargs = @(
             '-m', 'nuitka',
-            '--standalone',
+            '--onefile',
             '--assume-yes-for-downloads',
             '--unstripped',
             '--lto=no',
-            '--show-scons',
-            '--no-progressbar',
             '--output-dir=build'
           )
           if ('${{ inputs.toolchain }}' -eq 'msvc') {
