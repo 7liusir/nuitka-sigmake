@@ -84,6 +84,7 @@ jobs:
             '--unstripped',
             '--lto=no',
             '--show-scons',
+            '--no-progressbar',
             '--output-dir=build'
           )
           if ('${{ inputs.toolchain }}' -eq 'msvc') {
@@ -94,6 +95,44 @@ jobs:
           $nargs += 'target.py'
           Write-Host "nuitka args:" ($nargs -join ' ')
           python @nargs
+
+      - name: Diagnose PE sections (look for .debug_*)
+        if: inputs.toolchain == 'mingw'
+        shell: pwsh
+        run: |
+          # Find objdump from the Nuitka-managed MinGW cache.
+          $objdump = Get-ChildItem "$env:LOCALAPPDATA\Nuitka\Nuitka\Cache\downloads\gcc" `
+                      -Recurse -Filter 'objdump.exe' -ErrorAction SilentlyContinue |
+                     Select-Object -First 1 -ExpandProperty FullName
+          if (-not $objdump) { throw "objdump not found under Nuitka cache" }
+          $exe = (Get-ChildItem build -Recurse -Filter 'target.exe' | Select-Object -First 1).FullName
+          Write-Host "objdump: $objdump"
+          Write-Host "exe:     $exe"
+          Write-Host ""
+          Write-Host "=== all PE sections (discardable ones DO show up here) ==="
+          & $objdump -h $exe
+          Write-Host ""
+          Write-Host "=== .debug_* sections only ==="
+          & $objdump -h $exe | Select-String -Pattern '\.debug'
+          Write-Host ""
+          Write-Host "=== .debug section CONTENTS flags (D = discardable) ==="
+          # Helps answer: 'is IDA hiding them because of the DISCARDABLE flag?'
+          & $objdump -hw $exe | Select-String -Pattern '\.debug' -Context 0,1
+
+      - name: Split DWARF into companion .dbg (MinGW)
+        if: inputs.toolchain == 'mingw'
+        shell: pwsh
+        run: |
+          $objcopy = Get-ChildItem "$env:LOCALAPPDATA\Nuitka\Nuitka\Cache\downloads\gcc" `
+                      -Recurse -Filter 'objcopy.exe' -ErrorAction SilentlyContinue |
+                     Select-Object -First 1 -ExpandProperty FullName
+          if (-not $objcopy) { throw "objcopy not found under Nuitka cache" }
+          $exe = (Get-ChildItem build -Recurse -Filter 'target.exe' | Select-Object -First 1).FullName
+          $dbg = "$exe.dbg"
+          # --only-keep-debug writes a separate file containing just .debug_* sections.
+          & $objcopy --only-keep-debug $exe $dbg
+          Write-Host "Produced debug file:"
+          Get-Item $dbg | Format-List FullName, Length
 
       - name: Collect outputs (.exe, .pdb, build/*.obj)
         shell: pwsh
@@ -107,8 +146,8 @@ jobs:
           Write-Host "Found dist dir: $($distDir.FullName)"
           Copy-Item -Recurse $distDir.FullName artifacts/
 
-          # PDBs from MSVC link (if any)
-          Get-ChildItem -Recurse build -Include *.pdb -ErrorAction SilentlyContinue |
+          # PDBs from MSVC link (if any) + .dbg from objcopy (MinGW)
+          Get-ChildItem -Recurse build -Include *.pdb,*.dbg -ErrorAction SilentlyContinue |
             Copy-Item -Destination artifacts/ -Force
 
           # Intermediate *.build dir -- .c/.obj files, useful for per-TU symbol recovery
