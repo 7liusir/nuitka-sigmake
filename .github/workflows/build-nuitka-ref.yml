@@ -78,8 +78,7 @@ jobs:
             '--lto=no',
             '--show-scons',
             '--no-progressbar',
-            '--output-dir=build',
-            '--output-filename=ref'
+            '--output-dir=build'
           )
           if ('${{ inputs.toolchain }}' -eq 'msvc') {
             $nargs += '--msvc=${{ inputs.msvc_version }}'
@@ -94,14 +93,24 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          # Standalone dist (runnable reference + dependency DLLs)
-          Copy-Item -Recurse build/ref.dist artifacts/ref.dist
-          # Keep any PDBs produced by MSVC link
+
+          # dist dir is named <main_module>.dist (e.g. target.dist).
+          # Discover it so the workflow keeps working if target.py is renamed.
+          $distDir = Get-ChildItem -Path build -Filter '*.dist' -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $distDir) { throw "No *.dist directory found under build/" }
+          Write-Host "Found dist dir: $($distDir.FullName)"
+          Copy-Item -Recurse $distDir.FullName artifacts/
+
+          # PDBs from MSVC link (if any)
           Get-ChildItem -Recurse build -Include *.pdb -ErrorAction SilentlyContinue |
             Copy-Item -Destination artifacts/ -Force
-          # Keep the intermediate build dir too -- .obj files are gold for
-          # per-TU symbol recovery if BinDiff on the final .exe isn't enough.
-          Compress-Archive -Path build/ref.build -DestinationPath artifacts/ref.build.zip
+
+          # Intermediate *.build dir -- .c/.obj files, useful for per-TU symbol recovery
+          $buildDir = Get-ChildItem -Path build -Filter '*.build' -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($buildDir) {
+            Compress-Archive -Path $buildDir.FullName -DestinationPath artifacts/intermediate.build.zip
+          }
+
           Write-Host "=== artifact manifest ==="
           Get-ChildItem -Recurse artifacts | Select-Object FullName, Length | Format-Table -AutoSize
 
