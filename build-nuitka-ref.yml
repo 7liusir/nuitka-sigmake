@@ -1,0 +1,130 @@
+# .github/workflows/build-nuitka-ref.yml
+#
+# Build an unstripped Nuitka binary as a reference for BinDiff / Diaphora
+# symbol porting into a stripped target (e.g. flake.exe).
+#
+# Key design points:
+#   * --unstripped keeps symbols WITHOUT enabling --debug (which would add
+#     assertion code paths and hurt function matching).
+#   * --lto=no preserves function boundaries so the graph matcher lines up.
+#   * We let Nuitka find MSVC itself via its --msvc=VERSION selector; both
+#     windows-2022 and windows-2019 runners ship VS Build Tools pre-installed.
+#   * Artifact name encodes all three fingerprints so you can upload several
+#     builds and pick the one that matches flake.exe best.
+
+name: build-nuitka-ref
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "Python version (match target's python3XX.dll, e.g. 3.11.9)"
+        required: true
+        default: "3.11.9"
+      nuitka_version:
+        description: "Nuitka version (identified from strings/helpers in target)"
+        required: true
+        default: "2.4.8"
+      toolchain:
+        description: "Compiler"
+        required: true
+        default: "msvc"
+        type: choice
+        options: [msvc, mingw]
+      msvc_version:
+        description: "MSVC selector for Nuitka (14.2=VS2019, 14.3=VS2022, latest)"
+        required: false
+        default: "14.3"
+      arch:
+        description: "Target arch"
+        required: true
+        default: "x64"
+        type: choice
+        options: [x64, x86]
+      runner:
+        description: "Runner image (pair 14.3 with windows-2022, 14.2 with windows-2019)"
+        required: true
+        default: "windows-2022"
+        type: choice
+        options: [windows-2022, windows-2019, windows-latest]
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python_version }} (${{ inputs.arch }})
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          architecture: ${{ inputs.arch }}
+
+      - name: Install Nuitka ${{ inputs.nuitka_version }}
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "nuitka==${{ inputs.nuitka_version }}"
+          python -m nuitka --version
+
+      - name: Compile unstripped reference binary
+        shell: pwsh
+        run: |
+          $nargs = @(
+            '-m', 'nuitka',
+            '--standalone',
+            '--assume-yes-for-downloads',
+            '--unstripped',
+            '--lto=no',
+            '--show-scons',
+            '--no-progressbar',
+            '--output-dir=build',
+            '--output-filename=ref'
+          )
+          if ('${{ inputs.toolchain }}' -eq 'msvc') {
+            $nargs += '--msvc=${{ inputs.msvc_version }}'
+          } else {
+            $nargs += '--mingw64'
+          }
+          $nargs += 'target.py'
+          Write-Host "nuitka args:" ($nargs -join ' ')
+          python @nargs
+
+      - name: Collect outputs (.exe, .pdb, build/*.obj)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          # Standalone dist (runnable reference + dependency DLLs)
+          Copy-Item -Recurse build/ref.dist artifacts/ref.dist
+          # Keep any PDBs produced by MSVC link
+          Get-ChildItem -Recurse build -Include *.pdb -ErrorAction SilentlyContinue |
+            Copy-Item -Destination artifacts/ -Force
+          # Keep the intermediate build dir too -- .obj files are gold for
+          # per-TU symbol recovery if BinDiff on the final .exe isn't enough.
+          Compress-Archive -Path build/ref.build -DestinationPath artifacts/ref.build.zip
+          Write-Host "=== artifact manifest ==="
+          Get-ChildItem -Recurse artifacts | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Upload reference bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuitka-ref-py${{ inputs.python_version }}-n${{ inputs.nuitka_version }}-${{ inputs.toolchain }}${{ inputs.msvc_version }}-${{ inputs.arch }}
+          path: artifacts/
+          retention-days: 14
+          if-no-files-found: error
+
+# ---------------------------------------------------------------------------
+# Batch mode: replace the job above with a matrix if you want to try several
+# version combos in one run. Example:
+#
+# jobs:
+#   build:
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         python:   ["3.10.14", "3.11.9", "3.12.6"]
+#         nuitka:   ["2.3.11", "2.4.8", "2.5.1"]
+#         msvc:     ["14.3"]
+#     runs-on: windows-2022
+#     ...
+# ---------------------------------------------------------------------------
