@@ -69,13 +69,21 @@ jobs:
 
       - name: Compile unstripped reference binary
         shell: pwsh
+        env:
+          # Nuitka passes $CCFLAGS/$LDFLAGS through to the C compiler on top
+          # of its own flags. --unstripped only controls whether strip is
+          # called; without -g gcc emits no DWARF in the first place.
+          # Safe to set unconditionally: cl.exe ignores $CCFLAGS (uses $CL),
+          # so the MSVC path is unaffected.
+          CCFLAGS: ${{ inputs.toolchain == 'mingw' && '-g -gdwarf-4 -fno-eliminate-unused-debug-types' || '' }}
         run: |
           $nargs = @(
             '-m', 'nuitka',
-            '--onefile',
+            '--standalone',
             '--assume-yes-for-downloads',
             '--unstripped',
             '--lto=no',
+            '--show-scons',
             '--output-dir=build'
           )
           if ('${{ inputs.toolchain }}' -eq 'msvc') {
